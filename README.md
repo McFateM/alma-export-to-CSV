@@ -1,20 +1,23 @@
 # Alma Digital Title Export to CSV
 
-A Flet-based desktop application that searches for digital titles in the Alma API and exports bibliographic record metadata to CSV files with standardized column headings.
+A Flet-based desktop application that retrieves bibliographic records from Alma API using MMS IDs from a CSV file and exports metadata to CSV files with standardized column headings.
 
 ## Features
 
-- 🔍 **Title Search**: Search for digital titles using the Alma API
+- � **CSV Input**: Load MMS IDs from a CSV file for batch processing
 - 📊 **CSV Export**: Export bibliographic metadata with 67 standardized column headings
 - 🎨 **User-Friendly GUI**: Simple single-page interface built with Flet
 - 🔒 **Secure**: API key support with optional environment variable configuration
-- 📦 **Easy Setup**: Virtual environment and quick-launch script included
+- � **Comprehensive Logging**: Detailed file and console logging for debugging and auditing
+- �📦 **Easy Setup**: Virtual environment and quick-launch script included
+- 🚀 **Powered by almapipy**: Uses the official almapipy library from UC Davis Library
 
 ## Requirements
 
 - Python 3.8 or higher
 - Alma API key (read-only access to bibliographic records)
 - Internet connection
+- CSV file containing MMS IDs (with header row)
 
 ## Installation
 
@@ -28,6 +31,18 @@ cd alma-export-to-CSV
 ```bash
 cp .env.example .env
 # Edit .env and add your ALMA_API_KEY
+```
+
+## CSV Input File Format
+
+Your input CSV file should contain MMS IDs. The application will automatically detect a column with "mms" and "id" in the header name (case-insensitive). If no such header is found, it will use the first column.
+
+Example `sample_mms_ids.csv`:
+```csv
+mms_id
+991234567890104641
+991234567890204641
+991234567890304641
 ```
 
 ## Usage
@@ -71,14 +86,27 @@ python3 app.py
    - Enter your Alma API key in the "Alma API Key" field
    - Or set `ALMA_API_KEY` in your `.env` file to pre-fill this field
 
-2. **Search for Titles**:
-   - Enter a title search query in the "Title Search" field
-   - Example: "digital collection" or "annual report"
+2. **Select CSV File**:
+   - Click "Select CSV File" button
+   - Choose a CSV file containing MMS IDs
+   - The file name will appear in the text field
 
 3. **Export**:
-   - Click "Search and Export" button
-   - The app will search for matching digital titles
+   - Click "Export Records" button
+   - The app will retrieve all records from Alma for the given MMS IDs
    - Results will be exported to a CSV file with timestamp: `alma_export_YYYYMMDD_HHMMSS.csv`
+   - Check the status messages for progress updates
+
+## Logging
+
+The application creates detailed logs in the `logs/` directory:
+- Each run creates a new log file: `logs/alma_export_YYYYMMDD_HHMMSS.log`
+- Console output shows INFO level and above
+- Log files contain DEBUG level details including:
+  - API requests and responses
+  - MARC field extraction
+  - CSV export progress
+  - Error details with stack traces
 
 ## CSV Output Format
 
