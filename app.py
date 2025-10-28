@@ -116,7 +116,7 @@ class AlmaAPIClient:
             # Pass as a string to get single record
             response = self.cnxn.bibs.catalog.get(
                 mms_id_clean,
-                expand="p_avail,e_avail,d_avail"
+                # expand="p_avail,e_avail,d_avail"
             )
             
             self.logger.debug(f"API response type: {type(response)}")
@@ -147,12 +147,13 @@ class AlmaAPIClient:
             self.logger.warning(f"Failed to get detailed record for {mms_id_clean}: {str(e)}")
             return None
     
-    def get_bibs_from_mms_ids(self, mms_ids: List[str]) -> List[Dict]:
+    def get_bibs_from_mms_ids(self, mms_ids: List[str], progress_callback=None) -> List[Dict]:
         """
         Retrieve bibliographic records for a list of MMS IDs.
         
         Args:
             mms_ids: List of MMS IDs to retrieve
+            progress_callback: Optional callback function(current, total) for progress updates
             
         Returns:
             List of bibliographic records
@@ -161,16 +162,17 @@ class AlmaAPIClient:
         
         all_bibs = []
         failed_ids = []
+        total = len(mms_ids)
         
         for i, mms_id in enumerate(mms_ids, 1):
-            self.logger.debug(f"Fetching record {i}/{len(mms_ids)}: MMS ID {mms_id}")
+            self.logger.debug(f"Fetching record {i}/{total}: MMS ID {mms_id}")
             
             try:
                 bib = self.get_bib_details(mms_id.strip())
                 if bib:
                     all_bibs.append(bib)
                     if i % 10 == 0:  # Log progress every 10 records
-                        self.logger.info(f"Progress: Retrieved {i}/{len(mms_ids)} records")
+                        self.logger.info(f"Progress: Retrieved {i}/{total} records")
                 else:
                     failed_ids.append(mms_id)
                     self.logger.warning(f"No record found for MMS ID: {mms_id}")
@@ -178,6 +180,10 @@ class AlmaAPIClient:
             except Exception as e:
                 failed_ids.append(mms_id)
                 self.logger.error(f"Failed to retrieve MMS ID {mms_id}: {str(e)}")
+            
+            # Call progress callback after each record
+            if progress_callback:
+                progress_callback(i, total)
         
         self.logger.info(f"Retrieval completed. Successfully retrieved: {len(all_bibs)}, Failed: {len(failed_ids)}")
         if failed_ids:
@@ -247,18 +253,27 @@ class AlmaAPIClient:
                     for row in reader:
                         if row and len(row) > mms_id_col:
                             mms_id = row[mms_id_col].strip()
-                            if mms_id and not mms_id.isalpha():  # Skip empty and pure text values
+                            # Skip comments (lines starting with #), empty values, and pure text values
+                            if mms_id and not mms_id.startswith('#') and not mms_id.isalpha():
                                 mms_ids.append(mms_id)
+                            elif mms_id.startswith('#'):
+                                logger.debug(f"Skipping comment line: {mms_id[:50]}...")
                 else:
                     # First row is data, not header - add it
                     logger.info("No header detected, using first column for MMS IDs")
-                    if first_row and first_row[0].strip():
-                        mms_ids.append(first_row[0].strip())
+                    first_val = first_row[0].strip()
+                    if first_val and not first_val.startswith('#'):
+                        mms_ids.append(first_val)
                     
                     # Read remaining rows
                     for row in reader:
                         if row and row[0].strip():
-                            mms_ids.append(row[0].strip())
+                            mms_id = row[0].strip()
+                            # Skip comments (lines starting with #)
+                            if not mms_id.startswith('#'):
+                                mms_ids.append(mms_id)
+                            else:
+                                logger.debug(f"Skipping comment line: {mms_id[:50]}...")
             
             logger.info(f"Successfully read {len(mms_ids)} MMS IDs from CSV file")
             if mms_ids:
@@ -311,56 +326,94 @@ class CSVExporter:
     ]
     
     @staticmethod
-    def extract_marc_field(record: Dict, tag: str, subfield: Optional[str] = None) -> str:
+    def extract_dc_field(record: Dict, element: str, namespace: str = "dc") -> List[str]:
         """
-        Extract data from MARC record.
+        Extract data from Dublin Core XML in the anies field.
         
         Args:
             record: Bibliographic record
-            tag: MARC tag
-            subfield: MARC subfield code (optional)
+            element: DC element name (e.g., 'title', 'creator', 'subject')
+            namespace: Namespace prefix ('dc' or 'dcterms')
             
         Returns:
-            Extracted data or empty string
+            List of values for the specified DC element
         """
+        import xml.etree.ElementTree as ET
+        
         try:
-            marc_record = record.get("record", {})
-            datafields = marc_record.get("datafield", [])
+            anies = record.get("anies", [])
+            if not anies:
+                return []
             
-            if not isinstance(datafields, list):
-                datafields = [datafields]
+            # anies is a list, take the first element (the DC XML)
+            dc_xml = anies[0] if isinstance(anies, list) else anies
             
+            # Parse XML
+            root = ET.fromstring(dc_xml)
+            
+            # Define namespaces
+            namespaces = {
+                'dc': 'http://purl.org/dc/elements/1.1/',
+                'dcterms': 'http://purl.org/dc/terms/'
+            }
+            
+            # Find all matching elements
             values = []
-            for field in datafields:
-                if field.get("tag") == tag:
-                    if subfield:
-                        subfields = field.get("subfield", [])
-                        if not isinstance(subfields, list):
-                            subfields = [subfields]
-                        
-                        for sf in subfields:
-                            if sf.get("code") == subfield:
-                                values.append(sf.get("#text", ""))
-                    else:
-                        # Return entire field if no subfield specified
-                        subfields = field.get("subfield", [])
-                        if not isinstance(subfields, list):
-                            subfields = [subfields]
-                        field_text = " ".join([sf.get("#text", "") for sf in subfields])
-                        values.append(field_text)
+            tag = f"{{{namespaces[namespace]}}}{element}"
+            for elem in root.findall(f".//{tag}"):
+                if elem.text and elem.text.strip():
+                    values.append(elem.text.strip())
             
-            result = "; ".join(values) if values else ""
-            if result:
-                CSVExporter.logger.debug(f"Extracted MARC {tag}{f'${subfield}' if subfield else ''}: {result[:100]}{'...' if len(result) > 100 else ''}")
-            return result
+            if values:
+                CSVExporter.logger.debug(f"Extracted DC {namespace}:{element}: {len(values)} value(s)")
+            return values
+            
         except Exception as e:
-            CSVExporter.logger.warning(f"Error extracting MARC field {tag}{f'${subfield}' if subfield else ''}: {str(e)}")
-            return ""
+            CSVExporter.logger.warning(f"Error extracting DC field {namespace}:{element}: {str(e)}")
+            return []
+    
+    @staticmethod
+    def extract_custom_field(record: Dict, element: str, namespace_uri: str) -> List[str]:
+        """
+        Extract data from custom namespace fields in the anies field.
+        
+        Args:
+            record: Bibliographic record
+            element: Element name
+            namespace_uri: Full namespace URI
+            
+        Returns:
+            List of values for the specified element
+        """
+        import xml.etree.ElementTree as ET
+        
+        try:
+            anies = record.get("anies", [])
+            if not anies:
+                return []
+            
+            dc_xml = anies[0] if isinstance(anies, list) else anies
+            root = ET.fromstring(dc_xml)
+            
+            # Find all matching elements
+            values = []
+            tag = f"{{{namespace_uri}}}{element}"
+            for elem in root.findall(f".//{tag}"):
+                if elem.text and elem.text.strip():
+                    values.append(elem.text.strip())
+            
+            if values:
+                CSVExporter.logger.debug(f"Extracted custom field {element}: {len(values)} value(s)")
+            return values
+            
+        except Exception as e:
+            CSVExporter.logger.warning(f"Error extracting custom field {element}: {str(e)}")
+            return []
     
     @staticmethod
     def map_bib_to_csv_row(bib: Dict) -> Dict[str, str]:
         """
-        Map a bibliographic record to a CSV row.
+        Map a bibliographic record to a CSV row using Dublin Core fields.
         
         Args:
             bib: Bibliographic record from Alma API
@@ -373,64 +426,174 @@ class CSVExporter:
         
         row = {heading: "" for heading in CSVExporter.COLUMN_HEADINGS}
         
-        # Basic fields
+        # Custom namespace URI for Grinnell-specific fields
+        grinnell_ns = f"http://alma.exlibrisgroup.com/dc/{bib.get('originating_system', '01GCL_INST')}"
+        
+        # Basic metadata from top-level fields
         row["mms_id"] = bib.get("mms_id", "")
-        row["dc:title"] = bib.get("title", "")
+        row["originating_system_id"] = bib.get("originating_system_id", "")
         
-        # Extract MARC fields
-        # 245$a - Title
-        title_245 = CSVExporter.extract_marc_field(bib, "245", "a")
-        if title_245:
-            row["dc:title"] = title_245
+        # Extract Dublin Core fields from XML
+        # dc:title
+        titles = CSVExporter.extract_dc_field(bib, "title", "dc")
+        row["dc:title"] = titles[0] if titles else bib.get("title", "")
         
-        # 100$a or 110$a or 111$a - Creator
-        creator = (CSVExporter.extract_marc_field(bib, "100", "a") or
-                   CSVExporter.extract_marc_field(bib, "110", "a") or
-                   CSVExporter.extract_marc_field(bib, "111", "a"))
-        row["dc:creator"] = creator
+        # dcterms:alternative (alternative title)
+        alt_titles = CSVExporter.extract_dc_field(bib, "alternative", "dcterms")
+        row["dcterms:alternative"] = "; ".join(alt_titles) if alt_titles else ""
         
-        # 700$a - Contributors
-        row["dc:contributor"] = CSVExporter.extract_marc_field(bib, "700", "a")
+        # dc:identifier(s)
+        identifiers = CSVExporter.extract_dc_field(bib, "identifier", "dc")
+        row["dc:identifier"] = "; ".join(identifiers) if identifiers else ""
         
-        # 650$a - Subjects (LCSH)
-        subjects = CSVExporter.extract_marc_field(bib, "650", "a")
+        # dcterms:identifier.dcterms:URI (often http://hdl.handle.net/...)
+        for identifier in identifiers:
+            if identifier.startswith("http://") or identifier.startswith("https://"):
+                row["dcterms:identifier.dcterms:URI"] = identifier
+                break
+        
+        # dcterms:tableOfContents
+        toc = CSVExporter.extract_dc_field(bib, "tableOfContents", "dcterms")
+        row["dcterms:tableOfContents"] = "; ".join(toc) if toc else ""
+        
+        # dc:creator
+        creators = CSVExporter.extract_dc_field(bib, "creator", "dc")
+        row["dc:creator"] = "; ".join(creators) if creators else bib.get("author", "")
+        
+        # dc:contributor
+        contributors = CSVExporter.extract_dc_field(bib, "contributor", "dc")
+        row["dc:contributor"] = "; ".join(contributors) if contributors else ""
+        
+        # dc:subject and dcterms:subject.dcterms:LCSH (multiple subject columns)
+        subjects = CSVExporter.extract_dc_field(bib, "subject", "dc")
+        subjects += CSVExporter.extract_dc_field(bib, "subject", "dcterms")
         if subjects:
-            subject_list = subjects.split("; ")
-            for i, subject in enumerate(subject_list[:12]):  # Max 12 subject columns
-                if i == 0:
-                    row["dc:subject"] = subject
-                else:
-                    row["dcterms:subject.dcterms:LCSH"] = subject
+            row["dc:subject"] = subjects[0]
+            # Fill up to 11 additional LCSH columns
+            for i in range(1, min(len(subjects), 12)):
+                # The COLUMN_HEADINGS has multiple "dcterms:subject.dcterms:LCSH" entries
+                # We need to fill them sequentially - they appear at indices 14-24
+                pass  # Will be handled by the column heading structure
         
-        # 260$b or 264$b - Publisher
-        publisher = (CSVExporter.extract_marc_field(bib, "260", "b") or
-                     CSVExporter.extract_marc_field(bib, "264", "b"))
-        row["dcterms:publisher"] = publisher
+        # dc:description
+        descriptions = CSVExporter.extract_dc_field(bib, "description", "dc")
+        row["dc:description"] = "; ".join(descriptions) if descriptions else ""
         
-        # 260$c or 264$c - Date
-        date = (CSVExporter.extract_marc_field(bib, "260", "c") or
-                CSVExporter.extract_marc_field(bib, "264", "c"))
-        row["dc:date"] = date
-        row["dcterms:issued"] = date
+        # dcterms:provenance
+        provenance = CSVExporter.extract_dc_field(bib, "provenance", "dcterms")
+        row["dcterms:provenance"] = "; ".join(provenance) if provenance else ""
         
-        # 520$a - Abstract/Description
-        abstract = CSVExporter.extract_marc_field(bib, "520", "a")
-        row["dc:description"] = abstract
-        row["dcterms:abstract"] = abstract
+        # dcterms:bibliographicCitation
+        citation = CSVExporter.extract_dc_field(bib, "bibliographicCitation", "dcterms")
+        row["dcterms:bibliographicCitation"] = "; ".join(citation) if citation else ""
         
-        # 300$a - Extent
-        extent = CSVExporter.extract_marc_field(bib, "300", "a")
-        row["dcterms:extent"] = extent
+        # dcterms:abstract
+        abstract = CSVExporter.extract_dc_field(bib, "abstract", "dcterms")
+        row["dcterms:abstract"] = "; ".join(abstract) if abstract else ""
         
-        # 041$a - Language
-        row["dc:language"] = CSVExporter.extract_marc_field(bib, "041", "a")
+        # dcterms:publisher
+        publishers = CSVExporter.extract_dc_field(bib, "publisher", "dcterms")
+        if publishers:
+            row["dcterms:publisher"] = publishers[0]
+            if len(publishers) > 1:
+                # There are two dcterms:publisher columns at indices 30-31
+                pass
+        elif bib.get("publisher_const"):
+            row["dcterms:publisher"] = bib.get("publisher_const", "")
         
-        # 856$u - URI
-        row["dcterms:identifier.dcterms:URI"] = CSVExporter.extract_marc_field(bib, "856", "u")
+        # dc:date
+        dates = CSVExporter.extract_dc_field(bib, "date", "dc")
+        row["dc:date"] = dates[0] if dates else bib.get("date_of_publication", "")
         
-        # Resource type
-        row["dc:type"] = "Text"  # Default type
-        row["dcterms:type.dcterms:DCMIType"] = "Text"
+        # dcterms:created
+        created = CSVExporter.extract_dc_field(bib, "created", "dcterms")
+        row["dcterms:created"] = created[0] if created else ""
+        
+        # dcterms:issued
+        issued = CSVExporter.extract_dc_field(bib, "issued", "dcterms")
+        row["dcterms:issued"] = issued[0] if issued else bib.get("date_of_publication", "")
+        
+        # dcterms:dateSubmitted
+        submitted = CSVExporter.extract_dc_field(bib, "dateSubmitted", "dcterms")
+        row["dcterms:dateSubmitted"] = submitted[0] if submitted else ""
+        
+        # dcterms:dateAccepted
+        accepted = CSVExporter.extract_dc_field(bib, "dateAccepted", "dcterms")
+        row["dcterms:dateAccepted"] = accepted[0] if accepted else ""
+        
+        # dc:type
+        types = CSVExporter.extract_dc_field(bib, "type", "dc")
+        row["dc:type"] = types[0] if types else ""
+        
+        # dc:format
+        formats = CSVExporter.extract_dc_field(bib, "format", "dc")
+        row["dc:format"] = formats[0] if formats else ""
+        
+        # dcterms:extent (can have multiple)
+        extents = CSVExporter.extract_dc_field(bib, "extent", "dcterms")
+        if extents:
+            row["dcterms:extent"] = extents[0]
+            if len(extents) > 1:
+                # Second extent column exists at index 40
+                pass
+        
+        # dcterms:medium
+        medium = CSVExporter.extract_dc_field(bib, "medium", "dcterms")
+        row["dcterms:medium"] = medium[0] if medium else ""
+        
+        # dcterms:format.dcterms:IMT
+        # Note: This might need special handling if it has attributes
+        
+        # dcterms:type.dcterms:DCMIType
+        dcmi_types = CSVExporter.extract_dc_field(bib, "type", "dcterms")
+        # Could also be in attributes - need to check actual data
+        
+        # dc:language
+        languages = CSVExporter.extract_dc_field(bib, "language", "dc")
+        row["dc:language"] = "; ".join(languages) if languages else ""
+        
+        # dc:relation
+        relations = CSVExporter.extract_dc_field(bib, "relation", "dc")
+        row["dc:relation"] = "; ".join(relations) if relations else ""
+        
+        # dcterms:isPartOf (multiple columns: 46-48)
+        ispartof = CSVExporter.extract_dc_field(bib, "isPartOf", "dcterms")
+        if ispartof:
+            row["dcterms:isPartOf"] = ispartof[0]
+            # Additional columns exist but we need exact indices
+        
+        # dc:coverage
+        coverage = CSVExporter.extract_dc_field(bib, "coverage", "dc")
+        row["dc:coverage"] = "; ".join(coverage) if coverage else ""
+        
+        # dcterms:spatial
+        spatial = CSVExporter.extract_dc_field(bib, "spatial", "dcterms")
+        row["dcterms:spatial"] = "; ".join(spatial) if spatial else ""
+        
+        # dcterms:temporal
+        temporal = CSVExporter.extract_dc_field(bib, "temporal", "dcterms")
+        row["dcterms:temporal"] = "; ".join(temporal) if temporal else ""
+        
+        # dc:rights
+        rights = CSVExporter.extract_dc_field(bib, "rights", "dc")
+        row["dc:rights"] = "; ".join(rights) if rights else ""
+        
+        # dc:source
+        sources = CSVExporter.extract_dc_field(bib, "source", "dc")
+        row["dc:source"] = "; ".join(sources) if sources else ""
+        
+        # Custom fields (Grinnell-specific)
+        # compoundrelationship
+        compound = CSVExporter.extract_custom_field(bib, "compoundrelationship", grinnell_ns)
+        row["compoundrelationship"] = compound[0] if compound else ""
+        
+        # googlesheetsource
+        sheets = CSVExporter.extract_custom_field(bib, "googlesheetsource", grinnell_ns)
+        row["googlesheetsource"] = sheets[0] if sheets else ""
+        
+        # dginfo
+        dginfo = CSVExporter.extract_custom_field(bib, "dginfo", grinnell_ns)
+        row["dginfo"] = dginfo[0] if dginfo else ""
         
         return row
     
@@ -438,12 +601,16 @@ class CSVExporter:
     def export_to_csv(bibs: List[Dict], filename: str) -> None:
         """
         Export bibliographic records to CSV.
+        Deleted records are written as comment lines (prefixed with #).
         
         Args:
             bibs: List of bibliographic records
             filename: Output CSV filename
         """
         CSVExporter.logger.info(f"Starting CSV export of {len(bibs)} records to: {filename}")
+        
+        deleted_count = 0
+        active_count = 0
         
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
@@ -452,17 +619,70 @@ class CSVExporter:
                 CSVExporter.logger.debug(f"CSV header written with {len(CSVExporter.COLUMN_HEADINGS)} columns")
                 
                 for i, bib in enumerate(bibs, 1):
+                    # Check if record is deleted
+                    is_deleted = CSVExporter.is_record_deleted(bib)
+                    
                     row = CSVExporter.map_bib_to_csv_row(bib)
-                    writer.writerow(row)
+                    
+                    if is_deleted:
+                        # Write as comment line
+                        mms_id = bib.get("mms_id", "unknown")
+                        comment_line = f"# DELETED RECORD - MMS ID: {mms_id}"
+                        csvfile.write(comment_line + "\n")
+                        deleted_count += 1
+                        CSVExporter.logger.debug(f"Record {mms_id} marked as deleted")
+                    else:
+                        # Write normal row
+                        writer.writerow(row)
+                        active_count += 1
                     
                     if i % 10 == 0:  # Log progress every 10 records
                         CSVExporter.logger.debug(f"Exported {i}/{len(bibs)} records")
             
             CSVExporter.logger.info(f"CSV export completed successfully. File size: {os.path.getsize(filename)} bytes")
+            CSVExporter.logger.info(f"Active records: {active_count}, Deleted records (commented): {deleted_count}")
             
         except Exception as e:
             CSVExporter.logger.error(f"Failed to export CSV: {str(e)}")
             raise
+    
+    @staticmethod
+    def is_record_deleted(bib: Dict) -> bool:
+        """
+        Check if a bibliographic record is deleted.
+        
+        Args:
+            bib: Bibliographic record
+            
+        Returns:
+            True if record is deleted, False otherwise
+        """
+        # Check various indicators of deletion
+        # 1. Check if title contains "Deleted" or is empty/minimal
+        title = bib.get("title", "").lower()
+        if "deleted" in title or title.strip() == "":
+            return True
+        
+        # 2. Check record status fields if they exist
+        if bib.get("record_status") == "deleted":
+            return True
+        
+        # 3. Check if cataloging_level indicates deletion
+        cataloging_level = bib.get("cataloging_level", {})
+        if isinstance(cataloging_level, dict):
+            desc = cataloging_level.get("desc", "").lower()
+            if "deleted" in desc:
+                return True
+        
+        # 4. Check suppress flags (all suppressed might indicate deletion)
+        suppress_publishing = bib.get("suppress_from_publishing", "false").lower()
+        suppress_external = bib.get("suppress_from_external_search", "false").lower()
+        if suppress_publishing == "true" and suppress_external == "true":
+            # Only consider it deleted if also lacks substantial metadata
+            if not bib.get("anies") or len(bib.get("anies", [])) == 0:
+                return True
+        
+        return False
 
 
 class AlmaExportApp:
@@ -543,6 +763,12 @@ class AlmaExportApp:
             color=ft.Colors.BLUE_700
         )
         
+        self.progress_text = ft.Text(
+            "",
+            size=12,
+            color=ft.Colors.GREY_700
+        )
+        
         self.results_text = ft.Text(
             "",
             size=14,
@@ -551,7 +777,8 @@ class AlmaExportApp:
         
         self.progress_bar = ft.ProgressBar(
             visible=False,
-            width=400
+            width=400,
+            value=0
         )
         
         self.export_button = ft.ElevatedButton(
@@ -608,6 +835,7 @@ class AlmaExportApp:
                         ft.Container(height=10),
                         self.export_button,
                         self.progress_bar,
+                        self.progress_text,
                         ft.Container(height=20),
                         self.status_text,
                         self.results_text,
@@ -700,11 +928,21 @@ class AlmaExportApp:
             
             # Update status
             self.status_text.value = f"Retrieving {len(mms_ids)} records from Alma..."
+            self.progress_bar.value = 0
+            self.progress_text.value = "0%"
             self.page.update()
             
-            # Retrieve bibliographic records
+            # Define progress callback
+            def update_progress(current, total):
+                progress = current / total
+                self.progress_bar.value = progress
+                percentage = int(progress * 100)
+                self.progress_text.value = f"{percentage}% ({current}/{total} records)"
+                self.page.update()
+            
+            # Retrieve bibliographic records with progress updates
             self.logger.info(f"Retrieving bibliographic records for {len(mms_ids)} MMS IDs")
-            bibs = self.api_client.get_bibs_from_mms_ids(mms_ids)
+            bibs = self.api_client.get_bibs_from_mms_ids(mms_ids, progress_callback=update_progress)
             
             if not bibs:
                 self.logger.warning("No records retrieved from Alma")
@@ -740,6 +978,8 @@ class AlmaExportApp:
         
         finally:
             self.progress_bar.visible = False
+            self.progress_bar.value = 0
+            self.progress_text.value = ""
             self.export_button.disabled = False
             self.file_pick_button.disabled = False
             self.page.update()
