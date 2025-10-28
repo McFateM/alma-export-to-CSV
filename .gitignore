@@ -25,8 +25,9 @@ dist/
 # Environment variables
 .env
 
-# CSV output files (can be removed if you want to track them)
+# CSV output files and log files (can be removed if you want to track them)
 *.csv
+logs/*.log
 
 # OS
 .DS_Store
