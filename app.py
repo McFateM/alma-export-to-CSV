@@ -699,6 +699,7 @@ class AlmaExportApp:
         self.page.title = "Alma Digital Title Export to CSV"
         self.page.scroll = "adaptive"
         self.page.padding = 20
+        self.page.window.height = 750  # Set window height (default ~700px, now 750px)
         
         # Setup logging
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")

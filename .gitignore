@@ -26,7 +26,7 @@ dist/
 .env
 
 # CSV output files and log files (can be removed if you want to track them)
-alma_export*.csv
+# alma_export_*.csv
 logs/*.log
 
 # OS
