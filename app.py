@@ -110,6 +110,7 @@ class AlmaAPIClient:
         mms_id_clean = mms_id.strip()
         
         self.logger.debug(f"Fetching detailed record for MMS ID: {mms_id_clean}")
+        self.logger.info(f"API CALL → GET /almaws/v1/bibs/{mms_id_clean}")
         
         try:
             # Use almapipy to get the specific bib record
@@ -119,6 +120,7 @@ class AlmaAPIClient:
                 # expand="p_avail,e_avail,d_avail"
             )
             
+            self.logger.info(f"API RETURN ← Status: Success, MMS ID: {mms_id_clean}, Type: {type(response).__name__}")
             self.logger.debug(f"API response type: {type(response)}")
             
             # The response should be a single bib record dict
@@ -144,12 +146,30 @@ class AlmaAPIClient:
                 return None
             
         except Exception as e:
+            self.logger.error(f"API RETURN ← Status: FAILED, MMS ID: {mms_id_clean}, Error: {str(e)}")
             self.logger.warning(f"Failed to get detailed record for {mms_id_clean}: {str(e)}")
             return None
     
-    def get_bibs_from_mms_ids(self, mms_ids: List[str], progress_callback=None) -> List[Dict]:
+    def get_bibs_from_mms_ids(self, mms_ids: List[str], progress_callback=None, use_batch=False) -> List[Dict]:
         """
         Retrieve bibliographic records for a list of MMS IDs.
+        
+        Args:
+            mms_ids: List of MMS IDs to retrieve
+            progress_callback: Optional callback function(current, total) for progress updates
+            use_batch: If True, use batch API calls (100 IDs per call), otherwise individual calls
+            
+        Returns:
+            List of bibliographic records
+        """
+        if use_batch:
+            return self.get_bibs_batch(mms_ids, progress_callback)
+        else:
+            return self.get_bibs_individual(mms_ids, progress_callback)
+    
+    def get_bibs_individual(self, mms_ids: List[str], progress_callback=None) -> List[Dict]:
+        """
+        Retrieve bibliographic records one at a time (individual API calls).
         
         Args:
             mms_ids: List of MMS IDs to retrieve
@@ -158,7 +178,7 @@ class AlmaAPIClient:
         Returns:
             List of bibliographic records
         """
-        self.logger.info(f"Starting retrieval of {len(mms_ids)} bibliographic records by MMS ID")
+        self.logger.info(f"Starting INDIVIDUAL retrieval of {len(mms_ids)} bibliographic records")
         
         all_bibs = []
         failed_ids = []
@@ -186,6 +206,86 @@ class AlmaAPIClient:
                 progress_callback(i, total)
         
         self.logger.info(f"Retrieval completed. Successfully retrieved: {len(all_bibs)}, Failed: {len(failed_ids)}")
+        if failed_ids:
+            self.logger.warning(f"Failed MMS IDs: {', '.join(failed_ids[:10])}{'...' if len(failed_ids) > 10 else ''}")
+        
+        return all_bibs
+    
+    def get_bibs_batch(self, mms_ids: List[str], progress_callback=None) -> List[Dict]:
+        """
+        Retrieve bibliographic records using TRUE batch API calls (up to 100 IDs per call).
+        This significantly reduces the number of API calls compared to individual retrieval.
+        
+        Args:
+            mms_ids: List of MMS IDs to retrieve
+            progress_callback: Optional callback function(current, total) for progress updates
+            
+        Returns:
+            List of bibliographic records
+        """
+        self.logger.info(f"Starting BATCH retrieval of {len(mms_ids)} bibliographic records")
+        
+        all_bibs = []
+        failed_ids = []
+        total = len(mms_ids)
+        batch_size = 100  # Alma API supports up to 100 MMS IDs per batch call
+        
+        # Process in batches
+        for batch_start in range(0, total, batch_size):
+            batch_end = min(batch_start + batch_size, total)
+            batch_ids = [mms_id.strip() for mms_id in mms_ids[batch_start:batch_end]]
+            batch_num = (batch_start // batch_size) + 1
+            total_batches = (total + batch_size - 1) // batch_size
+            
+            self.logger.info(f"Processing batch {batch_num}/{total_batches}: IDs {batch_start+1}-{batch_end} ({len(batch_ids)} records)")
+            self.logger.info(f"API CALL → GET /almaws/v1/bibs with {len(batch_ids)} MMS IDs: {batch_ids[:3]}{'...' if len(batch_ids) > 3 else ''}")
+            
+            try:
+                # Use almapipy batch retrieval - pass list of IDs
+                response = self.cnxn.bibs.catalog.get(batch_ids)
+                
+                self.logger.info(f"API RETURN ← Status: Success, Batch {batch_num}, Response type: {type(response).__name__}")
+                self.logger.debug(f"Batch API response type: {type(response)}")
+                
+                # Handle response
+                batch_bibs = []
+                if isinstance(response, dict):
+                    # Response has 'bib' array
+                    if 'bib' in response:
+                        bibs = response.get('bib', [])
+                        if not isinstance(bibs, list):
+                            bibs = [bibs]
+                        batch_bibs = bibs
+                        self.logger.info(f"Batch {batch_num}: Retrieved {len(bibs)} records from response")
+                    else:
+                        self.logger.warning(f"Unexpected batch response structure: {list(response.keys())}")
+                elif isinstance(response, list):
+                    # Direct list of bibs
+                    batch_bibs = response
+                    self.logger.info(f"Batch {batch_num}: Retrieved {len(response)} records")
+                else:
+                    self.logger.warning(f"Unexpected batch response type: {type(response)}")
+                
+                all_bibs.extend(batch_bibs)
+                
+                # Track failed IDs (requested but not returned)
+                returned_ids = {bib.get('mms_id') for bib in batch_bibs if 'mms_id' in bib}
+                for mms_id in batch_ids:
+                    if mms_id not in returned_ids:
+                        failed_ids.append(mms_id)
+                        self.logger.warning(f"MMS ID not in batch response: {mms_id}")
+                    
+            except Exception as e:
+                self.logger.error(f"API RETURN ← Status: FAILED, Batch {batch_num}, Error: {str(e)}")
+                self.logger.error(f"Failed to retrieve batch {batch_num}: {str(e)}")
+                failed_ids.extend(batch_ids)
+            
+            # Update progress after each batch
+            if progress_callback:
+                progress_callback(batch_end, total)
+        
+        self.logger.info(f"Batch retrieval completed. Successfully retrieved: {len(all_bibs)}, Failed: {len(failed_ids)}")
+        self.logger.info(f"Total API calls made: {total_batches} (vs {total} for individual mode)")
         if failed_ids:
             self.logger.warning(f"Failed MMS IDs: {', '.join(failed_ids[:10])}{'...' if len(failed_ids) > 10 else ''}")
         
@@ -758,6 +858,13 @@ class AlmaExportApp:
             hint_text="Enter number"
         )
         
+        # API retrieval mode controls
+        self.batch_mode_checkbox = ft.Checkbox(
+            label="Use batch API calls (up to 100 records per call - significantly reduces API calls)",
+            value=False,
+            tooltip="Individual: 1 API call per record. Batch: 1 API call per 100 records (up to 100x fewer calls)"
+        )
+        
         self.status_text = ft.Text(
             "",
             size=14,
@@ -833,6 +940,8 @@ class AlmaExportApp:
                             ],
                             spacing=10,
                         ),
+                        ft.Container(height=10),
+                        self.batch_mode_checkbox,
                         ft.Container(height=10),
                         self.export_button,
                         self.progress_bar,
@@ -927,8 +1036,14 @@ class AlmaExportApp:
             
             self.logger.info(f"Processing {len(mms_ids)} MMS IDs")
             
+            # Check if batch mode is enabled
+            use_batch = self.batch_mode_checkbox.value
+            mode_text = "batch" if use_batch else "individual"
+            self.logger.info(f"Using {mode_text} API retrieval mode")
+            
             # Update status
-            self.status_text.value = f"Retrieving {len(mms_ids)} records from Alma..."
+            status_msg = f"Retrieving {len(mms_ids)} records from Alma ({mode_text} mode)..."
+            self.status_text.value = status_msg
             self.progress_bar.value = 0
             self.progress_text.value = "0%"
             self.page.update()
@@ -943,7 +1058,11 @@ class AlmaExportApp:
             
             # Retrieve bibliographic records with progress updates
             self.logger.info(f"Retrieving bibliographic records for {len(mms_ids)} MMS IDs")
-            bibs = self.api_client.get_bibs_from_mms_ids(mms_ids, progress_callback=update_progress)
+            bibs = self.api_client.get_bibs_from_mms_ids(
+                mms_ids, 
+                progress_callback=update_progress,
+                use_batch=use_batch
+            )
             
             if not bibs:
                 self.logger.warning("No records retrieved from Alma")
